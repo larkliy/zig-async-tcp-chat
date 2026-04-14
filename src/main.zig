@@ -14,8 +14,7 @@ const ClientContext = struct {
     user: *User, 
     reader: *net.Stream.Reader, 
     writer: *net.Stream.Writer, 
-    stream: net.Stream,
-    mutex: Io.Mutex
+    stream: net.Stream
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -91,7 +90,6 @@ fn handleClient(init: std.process.Init, current_stream: net.Stream) !void {
         .writer = &writer, 
         .user = &user, 
         .stream = current_stream,
-        .mutex = .init
     };
 
     std.log.info("New client connected", .{});
@@ -129,10 +127,10 @@ fn sendToOthers(init: std.process.Init, ctx: *ClientContext, message: []const u8
     const io = init.io;
     const gpa = init.gpa;
 
-    try ctx.mutex.lock(io);
-    defer ctx.mutex.unlock(io);
+    const streams_snapshot = try streams.getSnapshot(io);
+    defer gpa.free(streams_snapshot);
 
-    for (streams.list.items) |stream| {
+    for (streams_snapshot) |stream| {
         if (ctx.stream.socket.handle == stream.socket.handle) continue;
 
         var write_other_buf: [4096]u8 = undefined;
