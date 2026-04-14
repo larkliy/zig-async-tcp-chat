@@ -84,7 +84,12 @@ fn handleClient(init: std.process.Init, current_stream: net.Stream) !void {
     var reader = current_stream.reader(io, &read_buf);
     var writer = current_stream.writer(io, &write_buf);
 
-    var client_context = ClientContext{ .reader = &reader, .writer = &writer, .user = &user, .stream = current_stream };
+    var client_context = ClientContext{ 
+        .reader = &reader, 
+        .writer = &writer, 
+        .user = &user, 
+        .stream = current_stream
+    };
 
     std.log.info("New client connected", .{});
 
@@ -127,8 +132,9 @@ fn sendToOthers(init: std.process.Init, ctx: *ClientContext, message: []const u8
         var other_writer = stream.writer(io, &write_other_buf);
 
         const formatted = try std.fmt.allocPrint(
-            gpa, "[MESSAGE] {s}: {s}", 
-            .{ ctx.user.name.?, message });
+            gpa, "[MESSAGE] {s}: {s}\n", 
+            .{ ctx.user.name.?, message }
+        );
 
         defer gpa.free(formatted);
 
