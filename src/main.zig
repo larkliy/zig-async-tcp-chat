@@ -14,7 +14,8 @@ const ClientContext = struct {
     user: *User, 
     reader: *net.Stream.Reader, 
     writer: *net.Stream.Writer, 
-    stream: net.Stream
+    stream: net.Stream,
+    mutex: Io.Mutex
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -69,15 +70,16 @@ fn handleClientSafe(init: std.process.Init, stream: net.Stream) void {
 }
 
 fn handleClient(init: std.process.Init, current_stream: net.Stream) !void {
+    const io = init.io;
+
     var read_buf: [4096]u8 = undefined;
     var write_buf: [4096]u8 = undefined;
-    const io = init.io;
 
     var user = User{};
 
     defer {
         current_stream.close(init.io);
-
+        
         std.log.info("Client disconnected", .{});
     }
 
@@ -88,7 +90,8 @@ fn handleClient(init: std.process.Init, current_stream: net.Stream) !void {
         .reader = &reader, 
         .writer = &writer, 
         .user = &user, 
-        .stream = current_stream
+        .stream = current_stream,
+        .mutex = .init
     };
 
     std.log.info("New client connected", .{});
@@ -98,12 +101,13 @@ fn handleClient(init: std.process.Init, current_stream: net.Stream) !void {
             const auth_result = try handle_auth(init, &client_context);
 
             if (auth_result)
-                std.log.info("You're authorized.\n", .{});
+                std.log.info("You're authorized.", .{});
 
             continue;
         }
 
         try writer.interface.writeAll("[INFO] Enter the message text: ");
+        try writer.interface.flush();
 
         reader.interface.fillMore() catch |err| switch (err) {
             error.EndOfStream => break,
@@ -124,6 +128,9 @@ fn handleClient(init: std.process.Init, current_stream: net.Stream) !void {
 fn sendToOthers(init: std.process.Init, ctx: *ClientContext, message: []const u8) !void {
     const io = init.io;
     const gpa = init.gpa;
+
+    try ctx.mutex.lock(io);
+    defer ctx.mutex.unlock(io);
 
     for (streams.list.items) |stream| {
         if (ctx.stream.socket.handle == stream.socket.handle) continue;
