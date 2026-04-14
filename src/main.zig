@@ -104,6 +104,7 @@ fn handleClient(init: std.process.Init, current_stream: net.Stream) !void {
         }
 
         try writer.interface.writeAll("[INFO] Enter the message text: ");
+        try writer.interface.flush();
 
         reader.interface.fillMore() catch |err| switch (err) {
             error.EndOfStream => break,
