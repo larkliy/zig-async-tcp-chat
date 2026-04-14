@@ -30,5 +30,12 @@ pub fn ConcurrentList(comptime T: type) type {
 
             return self.list.orderedRemove(i);
         }
+
+        pub fn deinit(self: *Self, io: Io) !void {
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
+
+            self.list.deinit(self.gpa);
+        }
     };
 }
