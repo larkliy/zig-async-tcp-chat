@@ -1,13 +1,61 @@
 const std = @import("std");
+const Io = std.Io;
+const Dir = Io.Dir;
+
 const ChatServer = @import("server.zig").ChatServer;
+const Logger = @import("logger.zig").Logger;
+
+pub const Config = struct {
+    address: []const u8 = "0.0.0.0",
+    port: u16 = 8080,
+
+    log_file_path: []const u8 = "server.log",
+    should_console_print: bool = true
+};
+
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
-    const port = 8080;
+    const config = Config{};
 
-    var server = ChatServer.init(io, gpa, true);
-    defer server.deinit();
+    var log_file = try Dir.cwd().createFile(
+        io, 
+        config.log_file_path, 
+        .{ .truncate = false, .read = true }
+    );
 
-    try server.run("0.0.0.0", port);
+    defer log_file.close(io);
+
+    var log_writer_buffer: [1024]u8 = undefined;
+    var log_writer = log_file.writer(io, &log_writer_buffer);
+    const current_size = try log_file.length(io);
+    try log_writer.seekTo(current_size);
+
+    const logger = Logger.init(
+        io, 
+        &log_writer.interface, 
+        config.should_console_print
+    );
+
+    var server = ChatServer.init(io, gpa, logger);
+    var server_job = io.async(startServer, .{ &server, config.address, config.port });
+
+    defer { 
+        server_job.cancel(io);
+        _ = server_job.await(io);
+        
+        server.deinit();
+    }
+
+    var input_buffer: [1]u8 = undefined;
+    var stdin_reader = Io.File.stdin().reader(io, &input_buffer);
+    _ = stdin_reader.interface.takeByte() catch {};
+
+}
+
+fn startServer(server: *ChatServer, address:[]const u8, port: u16) void {
+    server.run(address, port) catch |err| {
+        server.logger.log_error("Server crashed: {s}", .{@errorName(err)}) catch {};
+    };
 }

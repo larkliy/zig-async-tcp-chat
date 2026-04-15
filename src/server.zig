@@ -1,40 +1,12 @@
 const std = @import("std");
 const User = @import("user.zig").User;
+const ClientContext = @import("client_context.zig").ClientContext;
 const Helper = @import("herlpers.zig").Helper;
+const Logger = @import("logger.zig").Logger;
 
 const Io = std.Io;
 const net = Io.net;
-const File = Io.File;
 const ConcurrentList = @import("concurrent_list.zig").ConcurrentList;
-
-const ClientContext = struct { 
-    user: *User, 
-    reader: *net.Stream.Reader, 
-    writer: *net.Stream.Writer, 
-    stream: net.Stream,
-
-    pub fn send(self: *ClientContext, data: []const u8) !void {
-        try self.writer.interface.writeAll(data);
-        try self.writer.interface.flush();
-    }
-
-    pub fn readln(self: *ClientContext) !?[]const u8 {
-        self.reader.interface.fillMore() catch |err| switch (err) {
-            error.EndOfStream => return null,
-            else => return err,
-        };
-
-        const line = try self.reader.interface.takeDelimiter('\n');
-        if (line == null) return null;
-
-        return std.mem.trim(u8, line.?, "\r\n");
-    }
-
-    pub fn print(self: *ClientContext, comptime fmt: []const u8, args: anytype) !void {
-        try self.writer.interface.print(fmt, args);
-        try self.writer.interface.flush();
-    }
-};
 
 
 pub const ChatServer = struct {
@@ -44,19 +16,19 @@ pub const ChatServer = struct {
     gpa: std.mem.Allocator,
     server: net.Server,
     client_group: Io.Group,
-    is_debug: bool,
     streams: ConcurrentList(net.Stream),
     users: ConcurrentList(User),
+    logger: Logger,
 
-    pub fn init(io: Io, gpa: std.mem.Allocator, is_debug: bool) ChatServer {
+    pub fn init(io: Io, gpa: std.mem.Allocator, logger: Logger) ChatServer {
         return ChatServer{
             .io = io,
             .gpa = gpa,
             .server = undefined,
             .client_group = .init,
-            .is_debug = is_debug,
             .streams = .init(gpa),
             .users = .init(gpa),
+            .logger = logger
         };
     }
 
@@ -65,26 +37,34 @@ pub const ChatServer = struct {
 
         self.server = try ip_address.listen(self.io, .{});
 
-        self.log_info("Chat server running on {s}:{d}", .{address, port});
+        try self.logger.log_info("Chat server running on {s}:{d}", .{address, port});
         
         while (true) {
             const stream = self.server.accept(self.io) catch |err| {
-                self.log_error("Accept error: {s}", .{@errorName(err)});
+
+                if (err == error.Canceled) {
+                    try self.logger.log_info("Accept canceled, shutting down loop...", .{});
+                    break; 
+                }
+
+                try self.logger.log_error("Accept error: {s}", .{@errorName(err)});
                 continue;
             };
 
             self.streams.append(self.io, stream) catch |err| {
-                self.log_error("Stream append error: {s}", .{@errorName(err)});
+                try self.logger.log_error("Stream append error: {s}", .{@errorName(err)});
                 continue;
             };
 
             self.client_group.async(self.io, handle_client, .{self, stream});
         }
+        
+        self.server.deinit(self.io);
     }
 
     fn handle_client(self: *Self, stream: net.Stream) void {
         handleClientInternal(self, stream) catch |err| {
-            self.log_error("Client handling error: {s}", .{@errorName(err)});
+            self.logger.log_error("Client handling error: {s}", .{@errorName(err)}) catch unreachable;
         };
     }
 
@@ -95,7 +75,7 @@ pub const ChatServer = struct {
         const ip_fmt = try std.fmt.bufPrint(&buf, "{f}", .{stream.socket.address}); 
 
         defer {
-            self.log_info("Closing connection from {s}", .{ip_fmt});
+            self.logger.log_info("Closing connection from {s}", .{ip_fmt}) catch unreachable;
             stream.close(self.io);
         }
 
@@ -117,7 +97,7 @@ pub const ChatServer = struct {
             .stream = stream
         };
 
-        self.log_info("Client connected from {s}", .{ip_fmt});
+        try self.logger.log_info("Client connected from {s}", .{ip_fmt});
 
         while (true) {
             if (!client_ctx.user.is_authorized) {
@@ -126,7 +106,7 @@ pub const ChatServer = struct {
             } else {
                 self.handle_commands(&client_ctx) catch |err| switch (err) {
                     error.UserExit => {
-                        self.log_info("User {s} disconnected", .{client_ctx.user.name.?});
+                        try self.logger.log_info("User {s} disconnected", .{client_ctx.user.name.?});
                         return;
                     },
                     else => return err,
@@ -145,7 +125,7 @@ pub const ChatServer = struct {
         ctx.user.name = try self.gpa.dupe(u8, name.?);
         ctx.user.is_authorized = true;
         
-        self.log_info("User {s} authenticated", .{name.?});
+        try self.logger.log_info("User {s} authenticated", .{name.?});
     }
 
     fn handle_commands(self: *Self, ctx: *ClientContext) !void {
@@ -155,7 +135,7 @@ pub const ChatServer = struct {
         if (command == null) return;
 
         if (std.mem.startsWith(u8, command.?, "/exit")) {
-            self.log_info("User {s} requested exit", .{ctx.user.name.?});
+            try self.logger.log_info("User {s} requested exit", .{ctx.user.name.?});
             return error.UserExit;
         } else {
             try self.sendToOthers(ctx, command.?);
@@ -181,34 +161,24 @@ pub const ChatServer = struct {
     }
 
     pub fn deinit(self: *Self) void {
-
-        self.streams.deinit(self.io) catch |err| {
-            self.log_error("Streams deinit error: {s}", .{@errorName(err)});
-        };
-
-        for (self.users.list.items) |user| {
-            if (user.name) |name|
-                self.gpa.free(name);
-        }
-
-        self.users.deinit(self.io) catch |err| {
-            self.log_error("Users deinit error: {s}", .{@errorName(err)});
-        };
-
-        self.server.deinit(self.io);
         self.client_group.cancel(self.io);
-    }
+        self.client_group.await(self.io) catch {};
 
+        self.streams.deinit(self.io) catch {};
 
-    fn log_info(self: *Self, comptime msg: []const u8, args: anytype) void {
-        if (self.is_debug) {
-            std.log.info(msg, args);
+        const snapshot = self.users.getSnapshot(self.io) catch |err| {
+            self.logger.log_error("Failed to get users snapshot during deinit: {s}", .{@errorName(err)}) catch {};
+            return;
+        };
+
+        defer self.gpa.free(snapshot);
+
+        for (snapshot) |user| {
+            if (user.name) |name| self.gpa.free(name);
         }
-    }
 
-    fn log_error(self: *Self, comptime msg: []const u8, args: anytype) void {
-        if (self.is_debug) {
-            std.log.err(msg, args);
-        }
+        self.users.deinit(self.io) catch {};
+
+        self.logger.log_info("Server resources cleared.", .{}) catch {};
     }
 };
