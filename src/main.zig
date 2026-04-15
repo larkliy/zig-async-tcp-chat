@@ -2,8 +2,10 @@ const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
 
-const ChatServer = @import("server.zig").ChatServer;
-const Logger = @import("logger.zig").Logger;
+const ChatServer = @import("chat_server.zig").ChatServer;
+const logger = @import("logger.zig");
+
+const logger_config_path = "server_config.json";
 
 pub const Config = struct {
     address: []const u8 = "0.0.0.0",
@@ -12,7 +14,6 @@ pub const Config = struct {
     log_file_path: []const u8 = "server.log",
     should_console_print: bool = true
 };
-
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -32,13 +33,12 @@ pub fn main(init: std.process.Init) !void {
     const current_size = try log_file.length(io);
     try log_writer.seekTo(current_size);
 
-    const logger = Logger.init(
-        io, 
-        &log_writer.interface, 
-        config.should_console_print
-    );
+    var console_impl = logger.ConsoleLogger{};
+    var file_impl = logger.FileLogger.init(io, &log_writer.interface);
 
-    var server = ChatServer.init(io, gpa, logger);
+    const logger_base = if (config.should_console_print) console_impl.logger() else file_impl.logger();
+
+    var server = ChatServer.init(io, gpa, logger_base);
     var server_job = io.async(startServer, .{ &server, config.address, config.port });
 
     defer { 
@@ -51,7 +51,6 @@ pub fn main(init: std.process.Init) !void {
     var input_buffer: [1]u8 = undefined;
     var stdin_reader = Io.File.stdin().reader(io, &input_buffer);
     _ = stdin_reader.interface.takeByte() catch {};
-
 }
 
 fn startServer(server: *ChatServer, address:[]const u8, port: u16) void {

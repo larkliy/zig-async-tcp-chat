@@ -1,7 +1,7 @@
 const std = @import("std");
 const User = @import("user.zig").User;
 const ClientContext = @import("client_context.zig").ClientContext;
-const Helper = @import("herlpers.zig").Helper;
+const Helpers = @import("server_helpers.zig").Helpers;
 const Logger = @import("logger.zig").Logger;
 
 const Io = std.Io;
@@ -64,7 +64,7 @@ pub const ChatServer = struct {
 
     fn handle_client(self: *Self, stream: net.Stream) void {
         handleClientInternal(self, stream) catch |err| {
-            self.logger.log_error("Client handling error: {s}", .{@errorName(err)}) catch unreachable;
+            self.logger.log_error("Client handling error: {s}", .{@errorName(err)}) catch {};
         };
     }
 
@@ -75,7 +75,7 @@ pub const ChatServer = struct {
         const ip_fmt = try std.fmt.bufPrint(&buf, "{f}", .{stream.socket.address}); 
 
         defer {
-            self.logger.log_info("Closing connection from {s}", .{ip_fmt}) catch unreachable;
+            self.logger.log_info("Closing connection from {s}", .{ip_fmt}) catch {};
             stream.close(self.io);
         }
 
@@ -152,7 +152,7 @@ pub const ChatServer = struct {
         for (streams_snapshot) |stream| {
             if (ctx.stream.socket.handle == stream.socket.handle) continue;
 
-            try Helper.send(
+            try Helpers.send(
                 io, stream, 
                 "[MESSAGE] {s}: {s}\n", 
                 .{ ctx.user.name.?, message }
@@ -163,6 +163,15 @@ pub const ChatServer = struct {
     pub fn deinit(self: *Self) void {
         self.client_group.cancel(self.io);
         self.client_group.await(self.io) catch {};
+
+        const streams_snapshot = self.streams.getSnapshot(self.io) catch |err| {
+            self.logger.log_error("Failed to get streams snapshot during deinit: {s}", .{@errorName(err)}) catch {};
+            return;
+        };
+
+        for (streams_snapshot) |stream| {
+            stream.close(self.io);
+        }
 
         self.streams.deinit(self.io) catch {};
 

@@ -3,7 +3,7 @@ const Io = std.Io;
 const net = Io.net;
 
 
-pub const Helper = struct {
+pub const Helpers = struct {
     pub fn send(io: Io, stream: net.Stream, comptime fmt: []const u8, args: anytype) !void {
         var buf: [4096]u8 = undefined;
         var writer = stream.writer(io, &buf);

@@ -12,8 +12,15 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize
         }),
-        .use_llvm = false
     });
+
+    if (exe.root_module.optimize != .Debug) {
+        exe.root_module.strip = true;
+        exe.root_module.single_threaded = false;
+        exe.root_module.unwind_tables = .none;
+        
+        // exe.lto = .full;
+    }
 
     b.installArtifact(exe);
 
