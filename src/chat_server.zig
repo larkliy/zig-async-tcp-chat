@@ -149,6 +149,7 @@ pub const ChatServer = struct {
         ctx.user.is_authorized = true;
         
         try self.logger.log_info("User {s} authenticated", .{name.?});
+        try self.sendToOthers(ctx, "User has been invited to the chat room.");
     }
 
     fn handle_commands(self: *Self, ctx: *ClientContext) !void {
