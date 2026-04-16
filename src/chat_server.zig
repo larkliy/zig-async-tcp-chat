@@ -153,8 +153,17 @@ pub const ChatServer = struct {
     }
 
     fn handle_commands(self: *Self, ctx: *ClientContext) !void {
-        try ctx.send("Enter commands (type /exit to disconnect): ");
+        const help_text = 
+            \\ Enter commands or type /help for help:
+            \\
+            \\ Available commands:
+            \\ /who - Shows list of online users
+            \\ /exit - Disconnects from the chat room
+            \\
+        ;
 
+        try ctx.send(help_text);
+        
         const command = try ctx.readln();
         if (command == null) return;
 
@@ -163,6 +172,8 @@ pub const ChatServer = struct {
             return error.UserExit;
         } else if (std.mem.eql(u8, command.?, "/who")) {
             try self.sendInfoAboutOthers(ctx);
+        } else if (std.mem.eql(u8, command.?, "/help")) {
+            try ctx.send(help_text);
         } else {
             try self.sendToOthers(ctx, command.?);
         }
@@ -174,10 +185,17 @@ pub const ChatServer = struct {
         const clients_snapshot = try self.clients.getSnapshot(self.io);
         defer self.gpa.free(clients_snapshot);
 
-        try ctx.print("Users online: {d} \n", .{self.clients.list.items.len});
+        const client_count = clients_snapshot.len;
+
+        try ctx.print("Users online: {d} \n", .{client_count});
+
+        var should_cut_info = false;
+
+        if (client_count > 10)
+            should_cut_info = true;
 
         for (clients_snapshot) |other_ctx| {
-            
+
             if (ctx.stream.socket.handle == other_ctx.stream.socket.handle) {
                 try ctx.print(" - You\n", .{});
                 continue;
@@ -185,6 +203,11 @@ pub const ChatServer = struct {
 
             if (other_ctx.user.name) |name| {
                 try ctx.print(" - {s}\n", .{ name });
+            }
+
+            if (should_cut_info) {
+                try ctx.print("   ...\n", .{});
+                break;
             }
         }
     }
