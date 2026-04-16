@@ -55,14 +55,14 @@ pub const FileLogger = struct {
         );
     }
 
-    fn log_info_impl(ptr: *anyopaque, msg: []const u8) void {
+    fn logInfoImpl(ptr: *anyopaque, msg: []const u8) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.writePrefix("INFO") catch return;
         self.writer.print("{s}\n", .{msg}) catch return;
         self.writer.flush() catch return;
     }
 
-    fn log_error_impl(ptr: *anyopaque, msg: []const u8) void {
+    fn logErrorImpl(ptr: *anyopaque, msg: []const u8) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.writePrefix("ERROR") catch return;
         self.writer.print("{s}\n", .{msg}) catch return;
@@ -73,8 +73,8 @@ pub const FileLogger = struct {
         return .{
             .ptr = self,
             .vtable = &.{
-                .log_info = log_info_impl,
-                .log_error = log_error_impl,
+                .logInfo = logInfoImpl,
+                .logError = logErrorImpl,
             },
         };
     }
@@ -83,11 +83,11 @@ pub const FileLogger = struct {
 pub const ConsoleLogger = struct {
     const Self = @This();
 
-    fn log_info_impl(_: *anyopaque, msg: []const u8) void {
+    fn logInfoImpl(_: *anyopaque, msg: []const u8) void {
         std.log.info("{s}", .{msg});
     }
 
-    fn log_error_impl(_: *anyopaque, msg: []const u8) void {
+    fn logErrorImpl(_: *anyopaque, msg: []const u8) void {
         std.log.err("{s}", .{msg});
     }
 
@@ -96,8 +96,8 @@ pub const ConsoleLogger = struct {
         return .{
             .ptr = undefined,
             .vtable = &.{
-                .log_info = log_info_impl,
-                .log_error = log_error_impl,
+                .logInfo = logInfoImpl,
+                .logError = logErrorImpl,
             },
         };
     }
@@ -108,19 +108,19 @@ pub const Logger = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        log_info: *const fn (*anyopaque, []const u8) void,
-        log_error: *const fn (*anyopaque, []const u8) void,
+        logInfo: *const fn (*anyopaque, []const u8) void,
+        logError: *const fn (*anyopaque, []const u8) void,
     };
 
     pub fn log_info(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
         var buf: [1024]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, fmt, args);
-        self.vtable.log_info(self.ptr, msg);
+        self.vtable.logInfo(self.ptr, msg);
     }
 
-    pub fn log_error(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
+    pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
         var buf: [1024]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, fmt, args);
-        self.vtable.log_error(self.ptr, msg);
+        self.vtable.logError(self.ptr, msg);
     }
 };

@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
 
         server_job.cancel(io) catch {};
         server_job.await(io) catch |err| {
-            logger_base.log_error("Server await error: {s}", .{@errorName(err)}) catch {};
+            logger_base.logError("Server await error: {s}", .{@errorName(err)}) catch {};
         };
 
     }

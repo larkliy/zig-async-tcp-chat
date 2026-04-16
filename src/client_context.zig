@@ -19,11 +19,6 @@ pub const ClientContext = struct {
     }
 
     pub fn readln(self: *Self) !?[]const u8 {
-        self.reader.interface.fillMore() catch |err| switch (err) {
-            error.EndOfStream => return null,
-            else => return err,
-        };
-
         const line = try self.reader.interface.takeDelimiter('\n');
         if (line == null) return null;
 

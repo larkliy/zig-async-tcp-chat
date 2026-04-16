@@ -4,6 +4,10 @@ const ClientContext = @import("client_context.zig").ClientContext;
 const Helpers = @import("server_helpers.zig").Helpers;
 const Logger = @import("logger.zig").Logger;
 
+const Literals = @import("literals.zig");
+const SystemLiterals = Literals.SystemLiterals;
+const UserLiterals = Literals.UserLiterals;
+
 const Io = std.Io;
 const net = Io.net;
 const ConcurrentList = @import("concurrent_list.zig").ConcurrentList;
@@ -46,19 +50,19 @@ pub const ChatServer = struct {
                     break; 
                 }
 
-                try self.logger.log_error("Accept error: {s}", .{@errorName(err)});
+                try self.logger.logError("Accept error: {s}", .{@errorName(err)});
                 continue;
             };
 
-            self.client_group.async(self.io, handle_client, .{self, stream});
+            self.client_group.async(self.io, handleClient, .{self, stream});
         }
         
         self.server.deinit(self.io);
     }
 
-    fn handle_client(self: *Self, stream: net.Stream) void {
+    fn handleClient(self: *Self, stream: net.Stream) void {
         handleClientInternal(self, stream) catch |err| {
-            self.logger.log_error("Client handling error: {s}", .{@errorName(err)}) catch {};
+            self.logger.logError("Client handling error: {s}", .{@errorName(err)}) catch {};
         };
     }
 
@@ -69,8 +73,8 @@ pub const ChatServer = struct {
         const ip_fmt = try std.fmt.bufPrint(&buf, "{f}", .{stream.socket.address}); 
 
         const client_ctx = try self.gpa.create(ClientContext);
-        const reader_buf = try self.gpa.alloc(u8, 4096);
-        const writer_buf = try self.gpa.alloc(u8, 4096);
+        const reader_buf = try self.gpa.alloc(u8, 1024);
+        const writer_buf = try self.gpa.alloc(u8, 1024);
 
         client_ctx.* = ClientContext{
             .user = .{
@@ -84,7 +88,7 @@ pub const ChatServer = struct {
         };
 
         self.clients.append(self.io, client_ctx) catch |err| {
-            try self.logger.log_error("Client append error: {s}", .{@errorName(err)});
+            try self.logger.logError("Client append error: {s}", .{@errorName(err)});
             self.gpa.free(reader_buf);
             self.gpa.free(writer_buf);
             self.gpa.destroy(client_ctx);
@@ -110,7 +114,6 @@ pub const ChatServer = struct {
         while (true) {
             if (!client_ctx.user.is_authorized) {
                 self.handle_auth(client_ctx) catch |err| switch (err) {
-                    error.EndOfStream,
                     error.WriteFailed,
                     error.ReadFailed => {
                         try self.logger.log_info("Connection dropped during auth for {s}", .{ip_fmt});
@@ -123,9 +126,9 @@ pub const ChatServer = struct {
                 self.handle_commands(client_ctx) catch |err| switch (err) {
                     error.UserExit => {
                         try self.logger.log_info("User {s} disconnected", .{client_ctx.user.name.?});
+                        try self.sendToOthers(client_ctx, UserLiterals.Disconnected);
                         return;
                     },
-                    error.EndOfStream, 
                     error.Canceled, 
                     error.WriteFailed, 
                     error.ReadFailed => {
@@ -139,9 +142,15 @@ pub const ChatServer = struct {
     }
 
     fn handle_auth(self: *Self, ctx: *ClientContext) !void {
-        try ctx.send("Enter your name: ");
+        try ctx.send(SystemLiterals.Welcome);
 
-        const name = try ctx.readln();
+        const name = ctx.readln() catch |err| {
+            if (err == error.StreamTooLong) {
+                try ctx.send(SystemLiterals.MessageTooLong);
+                return;
+            }
+            return err;
+        };
 
         if (name == null) return;
 
@@ -149,22 +158,21 @@ pub const ChatServer = struct {
         ctx.user.is_authorized = true;
         
         try self.logger.log_info("User {s} authenticated", .{name.?});
-        try self.sendToOthers(ctx, "User has been invited to the chat room.");
+
+        try self.sendToOthers(ctx, UserLiterals.Joined);
     }
 
     fn handle_commands(self: *Self, ctx: *ClientContext) !void {
-        const help_text = 
-            \\ Enter commands or type /help for help:
-            \\
-            \\ Available commands:
-            \\ /who - Shows list of online users
-            \\ /exit - Disconnects from the chat room
-            \\
-        ;
-
-        try ctx.send(help_text);
+        try ctx.send(SystemLiterals.Help);
         
-        const command = try ctx.readln();
+        const command = ctx.readln() catch |err| {
+            if (err == error.StreamTooLong) {
+                try ctx.send(SystemLiterals.MessageTooLong);
+                return;
+            }
+            return err;
+        };
+
         if (command == null) return;
 
         if (std.mem.startsWith(u8, command.?, "/exit")) {
@@ -173,7 +181,7 @@ pub const ChatServer = struct {
         } else if (std.mem.eql(u8, command.?, "/who")) {
             try self.sendInfoAboutOthers(ctx);
         } else if (std.mem.eql(u8, command.?, "/help")) {
-            try ctx.send(help_text);
+            try ctx.send(SystemLiterals.Help);
         } else {
             try self.sendToOthers(ctx, command.?);
         }
@@ -187,7 +195,7 @@ pub const ChatServer = struct {
 
         const client_count = clients_snapshot.len;
 
-        try ctx.print("Users online: {d} \n", .{client_count});
+        try ctx.print(SystemLiterals.UsersOnline, .{client_count});
 
         var should_cut_info = false;
 
@@ -224,7 +232,7 @@ pub const ChatServer = struct {
 
             if (!other_ctx.user.is_authorized) continue;
 
-            try Helpers.send(
+            try Helpers.print(
                 io, other_ctx.stream, 
                 "\n[MESSAGE] {s}: {s}\n",
                 .{ ctx.user.name.?, message }
@@ -249,9 +257,9 @@ pub const ChatServer = struct {
                 if (now - last > timeout_ms) {
                     self.logger.log_info("Kicking user due to inactivity", .{}) catch {};
 
-                    Helpers.send(
+                    Helpers.print(
                         self.io, ctx.stream, 
-                        "[KICK] You have been disconnected due to inactivity.\n", .{}
+                        "[KICK] {s}", .{SystemLiterals.KickedByInactivity}
                     ) catch {};
 
                     ctx.stream.shutdown(self.io, .both) catch {};
@@ -265,7 +273,7 @@ pub const ChatServer = struct {
         self.client_group.await(self.io) catch {};
 
         const clients_snapshot = self.clients.getSnapshot(self.io) catch |err| {
-            self.logger.log_error("Failed to get clients snapshot during deinit: {s}", .{@errorName(err)}) catch {};
+            self.logger.logError("Failed to get clients snapshot during deinit: {s}", .{@errorName(err)}) catch {};
             return;
         };
 
