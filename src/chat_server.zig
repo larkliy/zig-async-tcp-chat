@@ -161,11 +161,32 @@ pub const ChatServer = struct {
         if (std.mem.startsWith(u8, command.?, "/exit")) {
             try self.logger.log_info("User {s} requested exit", .{ctx.user.name.?});
             return error.UserExit;
+        } else if (std.mem.eql(u8, command.?, "/who")) {
+            try self.sendInfoAboutOthers(ctx);
         } else {
             try self.sendToOthers(ctx, command.?);
         }
 
         ctx.update_activity(self.io);
+    }
+
+    fn sendInfoAboutOthers(self: *Self, ctx: *ClientContext) !void {
+        const clients_snapshot = try self.clients.getSnapshot(self.io);
+        defer self.gpa.free(clients_snapshot);
+
+        try ctx.print("Users online: {d} \n", .{self.clients.list.items.len});
+
+        for (clients_snapshot) |other_ctx| {
+            
+            if (ctx.stream.socket.handle == other_ctx.stream.socket.handle) {
+                try ctx.print(" - You\n", .{});
+                continue;
+            }
+
+            if (other_ctx.user.name) |name| {
+                try ctx.print(" - {s}\n", .{ name });
+            }
+        }
     }
 
     fn sendToOthers(self: *Self, ctx: *ClientContext, message:[]const u8) !void {
@@ -182,7 +203,7 @@ pub const ChatServer = struct {
 
             try Helpers.send(
                 io, other_ctx.stream, 
-                "[MESSAGE] {s}: {s}\n", 
+                "\n[MESSAGE] {s}: {s}\n",
                 .{ ctx.user.name.?, message }
             );
         }
