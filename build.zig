@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     });
 
     if (exe.root_module.optimize != .Debug) {
-        exe.root_module.strip = false;
+        exe.root_module.strip = true;
         exe.root_module.single_threaded = false;
         exe.root_module.unwind_tables = .none;
         

@@ -1,5 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
+const Dir = Io.Dir;
+
+const Config = @import("config.zig").Config;
 
 pub const FileLogger = struct {
     const Self = @This();
@@ -7,10 +10,23 @@ pub const FileLogger = struct {
     io: std.Io,
     writer: *std.Io.Writer,
 
-    pub fn init(io: std.Io, writer: *std.Io.Writer) FileLogger {
+    pub fn init(io: std.Io, config: Config) !FileLogger {
+        var log_file = try Dir.cwd().createFile(
+            io, 
+            config.log_file_path, 
+            .{ .truncate = false, .read = true }
+        );
+
+        defer log_file.close(io);
+
+        var log_writer_buffer: [1024]u8 = undefined;
+        var log_writer = log_file.writer(io, &log_writer_buffer);
+        const current_size = try log_file.length(io);
+        try log_writer.seekTo(current_size);
+
         return .{
             .io = io,
-            .writer = writer,
+            .writer = &log_writer.interface,
         };
     }
 
