@@ -27,6 +27,18 @@ pub fn ConcurrentList(comptime T: type) type {
             return self.list.orderedRemove(i);
         }
 
+        pub fn removeByValue(self: *Self, io: Io, value: T) !void {
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
+
+            for (self.list.items, 0..) |item, i| {
+                if (item == value) {
+                    _ = self.list.orderedRemove(i);
+                    break;
+                }
+            }
+        }
+
         pub fn lockList(self: *Self, io: Io) !void {
             try self.mutex.lock(io);
         }

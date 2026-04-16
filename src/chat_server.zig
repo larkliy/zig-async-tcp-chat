@@ -8,7 +8,6 @@ const Io = std.Io;
 const net = Io.net;
 const ConcurrentList = @import("concurrent_list.zig").ConcurrentList;
 
-
 pub const ChatServer = struct {
     const Self = @This();
 
@@ -16,8 +15,7 @@ pub const ChatServer = struct {
     gpa: std.mem.Allocator,
     server: net.Server,
     client_group: Io.Group,
-    streams: ConcurrentList(net.Stream),
-    users: ConcurrentList(User),
+    clients: ConcurrentList(*ClientContext),
     logger: Logger,
 
     pub fn init(io: Io, gpa: std.mem.Allocator, logger: Logger) ChatServer {
@@ -26,19 +24,20 @@ pub const ChatServer = struct {
             .gpa = gpa,
             .server = undefined,
             .client_group = .init,
-            .streams = .init(gpa),
-            .users = .init(gpa),
+            .clients = .init(gpa),
             .logger = logger
         };
     }
 
-    pub fn run(self: *Self, address: []const u8, port: u16) !void {
+    pub fn run(self: *Self, address:[]const u8, port: u16) !void {
         const ip_address = try net.IpAddress.parse(address, port);
-
+        
         self.server = try ip_address.listen(self.io, .{});
 
         try self.logger.log_info("Chat server running on {s}:{d}", .{address, port});
         
+        self.client_group.async(self.io, watchdogTask, .{self});
+
         while (true) {
             const stream = self.server.accept(self.io) catch |err| {
 
@@ -48,11 +47,6 @@ pub const ChatServer = struct {
                 }
 
                 try self.logger.log_error("Accept error: {s}", .{@errorName(err)});
-                continue;
-            };
-
-            self.streams.append(self.io, stream) catch |err| {
-                try self.logger.log_error("Stream append error: {s}", .{@errorName(err)});
                 continue;
             };
 
@@ -71,42 +65,71 @@ pub const ChatServer = struct {
     fn handleClientInternal(self: *Self, stream: net.Stream) !void {
         const io = self.io;
 
-        var buf: [100]u8 = undefined;
+        var buf:[100]u8 = undefined;
         const ip_fmt = try std.fmt.bufPrint(&buf, "{f}", .{stream.socket.address}); 
+
+        const client_ctx = try self.gpa.create(ClientContext);
+        const reader_buf = try self.gpa.alloc(u8, 4096);
+        const writer_buf = try self.gpa.alloc(u8, 4096);
+
+        client_ctx.* = ClientContext{
+            .user = .{
+                .is_authorized = false,
+                .name = null
+            },
+            .reader = stream.reader(io, reader_buf),
+            .writer = stream.writer(io, writer_buf),
+            .stream = stream,
+            .last_activity = .init(Io.Timestamp.now(io, .awake).toMilliseconds())
+        };
+
+        self.clients.append(self.io, client_ctx) catch |err| {
+            try self.logger.log_error("Client append error: {s}", .{@errorName(err)});
+            self.gpa.free(reader_buf);
+            self.gpa.free(writer_buf);
+            self.gpa.destroy(client_ctx);
+            stream.close(self.io);
+            return err;
+        };
 
         defer {
             self.logger.log_info("Closing connection from {s}", .{ip_fmt}) catch {};
+
             stream.close(self.io);
+
+            self.clients.removeByValue(self.io, client_ctx) catch {};
+            
+            if (client_ctx.user.name) |name| self.gpa.free(name);
+            self.gpa.free(reader_buf);
+            self.gpa.free(writer_buf);
+            self.gpa.destroy(client_ctx);
         }
-
-        var writer_buf: [4096]u8 = undefined;
-        var reader_buf: [4096]u8 = undefined;
-
-        var user = User{
-            .is_authorized = false,
-            .name = null
-        };
-
-        var reader = stream.reader(io, &reader_buf);
-        var writer = stream.writer(io, &writer_buf);
-
-        var client_ctx = ClientContext{
-            .user = &user,
-            .reader = &reader,
-            .writer = &writer,
-            .stream = stream
-        };
 
         try self.logger.log_info("Client connected from {s}", .{ip_fmt});
 
         while (true) {
             if (!client_ctx.user.is_authorized) {
-                try self.handle_auth(&client_ctx);
+                self.handle_auth(client_ctx) catch |err| switch (err) {
+                    error.EndOfStream,
+                    error.WriteFailed,
+                    error.ReadFailed => {
+                        try self.logger.log_info("Connection dropped during auth for {s}", .{ip_fmt});
+                        return;
+                    },
+                    else => return err,
+                };
                 continue;
             } else {
-                self.handle_commands(&client_ctx) catch |err| switch (err) {
+                self.handle_commands(client_ctx) catch |err| switch (err) {
                     error.UserExit => {
                         try self.logger.log_info("User {s} disconnected", .{client_ctx.user.name.?});
+                        return;
+                    },
+                    error.EndOfStream, 
+                    error.Canceled, 
+                    error.WriteFailed, 
+                    error.ReadFailed => {
+                        try self.logger.log_info("Connection dropped/timed out for {s}", .{ip_fmt});
                         return;
                     },
                     else => return err,
@@ -140,23 +163,55 @@ pub const ChatServer = struct {
         } else {
             try self.sendToOthers(ctx, command.?);
         }
+
+        ctx.update_activity(self.io);
     }
 
-    fn sendToOthers(self: *Self, ctx: *ClientContext, message: []const u8) !void {
+    fn sendToOthers(self: *Self, ctx: *ClientContext, message:[]const u8) !void {
         const io = self.io;
         const gpa = self.gpa;
 
-        const streams_snapshot = try self.streams.getSnapshot(io);
-        defer gpa.free(streams_snapshot);
+        const clients_snapshot = try self.clients.getSnapshot(io);
+        defer gpa.free(clients_snapshot);
 
-        for (streams_snapshot) |stream| {
-            if (ctx.stream.socket.handle == stream.socket.handle) continue;
+        for (clients_snapshot) |other_ctx| {
+            if (ctx.stream.socket.handle == other_ctx.stream.socket.handle) continue;
+
+            if (!other_ctx.user.is_authorized) continue;
 
             try Helpers.send(
-                io, stream, 
+                io, other_ctx.stream, 
                 "[MESSAGE] {s}: {s}\n", 
                 .{ ctx.user.name.?, message }
             );
+        }
+    }
+
+    fn watchdogTask(self: *Self) void {
+        const timeout_ms: i64 = 60 * std.time.ms_per_s;
+
+        while (true) {
+            self.io.sleep(.fromSeconds(5), .awake) catch return;
+
+            const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+
+            const clients_snapshot = self.clients.getSnapshot(self.io) catch continue;
+            defer self.gpa.free(clients_snapshot);
+
+            for (clients_snapshot) |ctx| {
+                const last = ctx.last_activity.load(.monotonic);
+                
+                if (now - last > timeout_ms) {
+                    self.logger.log_info("Kicking user due to inactivity", .{}) catch {};
+
+                    Helpers.send(
+                        self.io, ctx.stream, 
+                        "[KICK] You have been disconnected due to inactivity.\n", .{}
+                    ) catch {};
+
+                    ctx.stream.shutdown(self.io, .both) catch {};
+                }
+            }
         }
     }
 
@@ -164,29 +219,16 @@ pub const ChatServer = struct {
         self.client_group.cancel(self.io);
         self.client_group.await(self.io) catch {};
 
-        const streams_snapshot = self.streams.getSnapshot(self.io) catch |err| {
-            self.logger.log_error("Failed to get streams snapshot during deinit: {s}", .{@errorName(err)}) catch {};
+        const clients_snapshot = self.clients.getSnapshot(self.io) catch |err| {
+            self.logger.log_error("Failed to get clients snapshot during deinit: {s}", .{@errorName(err)}) catch {};
             return;
         };
 
-        for (streams_snapshot) |stream| {
-            stream.close(self.io);
+        for (clients_snapshot) |ctx| {
+            ctx.stream.close(self.io);
         }
 
-        self.streams.deinit(self.io) catch {};
-
-        const snapshot = self.users.getSnapshot(self.io) catch |err| {
-            self.logger.log_error("Failed to get users snapshot during deinit: {s}", .{@errorName(err)}) catch {};
-            return;
-        };
-
-        defer self.gpa.free(snapshot);
-
-        for (snapshot) |user| {
-            if (user.name) |name| self.gpa.free(name);
-        }
-
-        self.users.deinit(self.io) catch {};
+        self.clients.deinit(self.io) catch {};
 
         self.logger.log_info("Server resources cleared.", .{}) catch {};
     }

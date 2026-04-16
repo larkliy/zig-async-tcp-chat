@@ -36,7 +36,10 @@ pub fn main(init: std.process.Init) !void {
     var console_impl = logger.ConsoleLogger{};
     var file_impl = logger.FileLogger.init(io, &log_writer.interface);
 
-    const logger_base = if (config.should_console_print) console_impl.logger() else file_impl.logger();
+    const logger_base = if (config.should_console_print) 
+        console_impl.logger() 
+            else
+        file_impl.logger();
 
     var server = ChatServer.init(io, gpa, logger_base);
     var server_job = io.async(startServer, .{ &server, config.address, config.port });
