@@ -1,66 +1,76 @@
 const std = @import("std");
-const logger = @import("logger.zig");
 const Io = std.Io;
-const Dir = Io.Dir;
+const zio = @import("zio");
 
 const ChatServer = @import("chat_server.zig").ChatServer;
-const Config = @import("config.zig").Config;
 
 const logger_config_path = "server_config.json";
 
-pub fn main(init: std.process.Init) !void {
-    const io = init.io;
-    const gpa = init.gpa;
+const SERVER_PORT: u32 = 9999;
+const SERVER_ADDRESS = "127.0.0.1";
 
-    var config: Config = undefined;
+const Config = struct {
+    port: u32,
+    address: []const u8
+};
 
-    var config_parsed: ?std.json.Parsed(Config) = null;
-    defer if (config_parsed) |*p| p.deinit();
+pub fn main(init: std.process.Init.Minimal) !void {
+    const allocator = std.heap.smp_allocator;
 
-    if (!try Config.checkIfExists(io, logger_config_path)) {
-        std.debug.print("Config file not found, creating default config file...\n", .{});
-        config = .{};
-        try config.save(io, logger_config_path);
-    } else {
-        std.debug.print("Config file found, loading...\n", .{});
-        config_parsed = try Config.load(io, gpa, logger_config_path);
-        config = config_parsed.?.value;
-    }
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const io = rt.io();
 
-    var console_impl = logger.ConsoleLogger{};
-    var file_impl = try logger.FileLogger.init(io, config);
+    const arena_allocator = std.heap.ArenaAllocator.init(allocator);
+    defer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
 
-    var logger_base = if (config.should_console_print) 
-        console_impl.logger() 
-            else
-        file_impl.logger();
+    const args = try init.args.toSlice(arena);
+    const config = try parseServerAndPort(io, args);
 
-    var server = ChatServer.init(io, gpa, logger_base);
+    var server = ChatServer.init(io, allocator);
 
-    var server_job = io.async(
-        startServer, 
-        .{ &server, config.address, config.port }
-    );
+    var server_job = io.concurrent(startServer, .{ &server, SERVER_ADDRESS, SERVER_PORT }) catch 
+        io.async(startServer, .{ &server, config.address, config.port });
+
+    server_job.await(io) catch {};
 
     var input_buffer: [1]u8 = undefined;
     var stdin_reader = Io.File.stdin().reader(io, &input_buffer);
     _ = stdin_reader.interface.takeByte() catch {};
 
-    if (@import("builtin").mode == .Debug) {
-
-        try server_job.cancel(io);
-        try server_job.await(io);
-
-    } else {
-
-        server_job.cancel(io) catch {};
-        server_job.await(io) catch |err| {
-            logger_base.logError("Server await error: {s}", .{@errorName(err)}) catch {};
-        };
-
-    }
+    server_job.cancel(io) catch {};
         
     server.deinit();
+}
+
+fn parseServerAndPort(io: Io, args: []const [:0]const u8) !Config {
+    var address_opt: ?[]const u8 = null;
+    var port_opt: ?u32 = null;
+
+    for (args, 0..) |arg, i| {
+        if (std.mem.eql(u8, arg, "--address")) {
+            if (i + 1 < args.len) {
+                address_opt = args[i + 1];
+            }
+        }
+
+        if (std.mem.eql(u8, arg, "--port")) {
+            if (i + 1 < args.len) {
+                port_opt = args[i + 1];
+            }
+        }
+    }
+
+    if (address_opt == null or port_opt == null) {
+        try Io.File.stdout().writeStreamingAll(io, "Some parameter is missing. Please enter parameters in the following format: --address 127.0.0.1 --port 9999.");
+        return;
+    }
+
+    return .{
+        .address = address_opt.?,
+        .port = port_opt.?
+    };
 }
 
 fn startServer(server: *ChatServer, address:[]const u8, port: u16) !void {

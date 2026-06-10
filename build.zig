@@ -22,6 +22,13 @@ pub fn build(b: *std.Build) void {
         // exe.lto = .full;
     }
 
+    const zio = b.dependency("zio", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("zio", zio.module("zio"));
+
     b.installArtifact(exe);
 
     const run_exe = b.addRunArtifact(exe);

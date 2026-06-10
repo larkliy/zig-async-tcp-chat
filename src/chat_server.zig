@@ -2,7 +2,6 @@ const std = @import("std");
 const User = @import("user.zig").User;
 const ClientContext = @import("client_context.zig").ClientContext;
 const Helpers = @import("server_helpers.zig").Helpers;
-const Logger = @import("logger.zig").Logger;
 
 const Literals = @import("literals.zig");
 const SystemLiterals = Literals.SystemLiterals;
@@ -20,16 +19,14 @@ pub const ChatServer = struct {
     server: net.Server,
     client_group: Io.Group,
     clients: ConcurrentList(*ClientContext),
-    logger: Logger,
 
-    pub fn init(io: Io, gpa: std.mem.Allocator, logger: Logger) ChatServer {
+    pub fn init(io: Io, gpa: std.mem.Allocator) ChatServer {
         return ChatServer{
             .io = io,
             .gpa = gpa,
             .server = undefined,
             .client_group = .init,
-            .clients = .init(gpa),
-            .logger = logger
+            .clients = .init(gpa)
         };
     }
 
@@ -38,106 +35,88 @@ pub const ChatServer = struct {
         
         self.server = try ip_address.listen(self.io, .{});
 
-        try self.logger.log_info("Chat server running on {s}:{d}", .{address, port});
+        std.log.info("Chat server running on {s}:{d}", .{address, port});
         
-        self.client_group.async(self.io, watchdogTask, .{self});
+        try self.client_group.concurrent(self.io, watchdogTask, .{self});
 
         while (true) {
             const stream = self.server.accept(self.io) catch |err| {
 
                 if (err == error.Canceled) {
-                    try self.logger.log_info("Accept canceled, shutting down loop...", .{});
+                    std.log.info("Accept canceled, shutting down loop...", .{});
                     break; 
                 }
 
-                try self.logger.logError("Accept error: {s}", .{@errorName(err)});
+                std.log.err("Accept error: {s}", .{@errorName(err)});
                 continue;
             };
 
-            self.client_group.async(self.io, handleClient, .{self, stream});
+            try self.client_group.concurrent(self.io, handleClient, .{self, stream});
         }
         
         self.server.deinit(self.io);
     }
 
-    fn handleClient(self: *Self, stream: net.Stream) void {
-        handleClientInternal(self, stream) catch |err| {
-            self.logger.logError("Client handling error: {s}", .{@errorName(err)}) catch {};
-        };
-    }
-
-    fn handleClientInternal(self: *Self, stream: net.Stream) !void {
+    fn handleClient(self: *Self, stream: net.Stream) Io.Cancelable!void {
         const io = self.io;
 
-        var buf:[100]u8 = undefined;
-        const ip_fmt = try std.fmt.bufPrint(&buf, "{f}", .{stream.socket.address}); 
-
-        const client_ctx = try self.gpa.create(ClientContext);
-        const reader_buf = try self.gpa.alloc(u8, 1024);
-        const writer_buf = try self.gpa.alloc(u8, 1024);
-
-        client_ctx.* = ClientContext{
-            .user = .{
-                .is_authorized = false,
-                .name = null
-            },
-            .reader = stream.reader(io, reader_buf),
-            .writer = stream.writer(io, writer_buf),
-            .stream = stream,
-            .last_activity = .init(Io.Timestamp.now(io, .awake).toMilliseconds())
+        const client_ctx = self.gpa.create(ClientContext) catch {
+            std.log.err("Out of memory while creating ClientContext object.", .{});
+            return;
         };
 
-        self.clients.append(self.io, client_ctx) catch |err| {
-            try self.logger.logError("Client append error: {s}", .{@errorName(err)});
-            self.gpa.free(reader_buf);
-            self.gpa.free(writer_buf);
-            self.gpa.destroy(client_ctx);
-            stream.close(self.io);
-            return err;
+        client_ctx.init(io, self.gpa, stream) catch |err| {
+            std.log.err("An error ocurred while ClientContext init: {}", .{err});
+            return;
         };
 
-        defer {
-            self.logger.log_info("Closing connection from {s}", .{ip_fmt}) catch {};
+        errdefer |err| {
+            std.log.err("An error ocurred in handleClient: {}", .{err});
+            client_ctx.deinit(io);
 
-            stream.close(self.io);
-
-            self.clients.removeByValue(self.io, client_ctx) catch {};
-            
-            if (client_ctx.user.name) |name| self.gpa.free(name);
-            self.gpa.free(reader_buf);
-            self.gpa.free(writer_buf);
             self.gpa.destroy(client_ctx);
         }
 
-        try self.logger.log_info("Client connected from {s}", .{ip_fmt});
+        self.clients.append(self.io, client_ctx) catch {
+            std.log.err("Out of memory while creating client append object.", .{});
+            return;
+        };
+
+        var buf: [512]u8 = undefined;
+        const ip_fmt = std.fmt.bufPrint(&buf, "{f}", .{stream.socket.address}) catch return;
+
+        defer {
+            std.log.info("Closing connection from {s}", .{ip_fmt});
+
+            client_ctx.deinit(io);
+            self.clients.removeByValue(self.io, client_ctx) catch {};
+
+            self.gpa.destroy(client_ctx);
+        }
+
+        std.log.info("Client connected from {s}", .{ip_fmt});
 
         while (true) {
             if (!client_ctx.user.is_authorized) {
-                self.handle_auth(client_ctx) catch |err| switch (err) {
-                    error.WriteFailed,
-                    error.ReadFailed => {
-                        try self.logger.log_info("Connection dropped during auth for {s}", .{ip_fmt});
-                        return;
-                    },
-                    else => return err,
+                self.handle_auth(client_ctx) catch |err| {
+                    std.log.err("Connection dropped/timed out for {s}. Error: {}", .{ip_fmt, err});
+                    return;
                 };
+
                 continue;
-            } else {
-                self.handle_commands(client_ctx) catch |err| switch (err) {
-                    error.UserExit => {
-                        try self.logger.log_info("User {s} disconnected", .{client_ctx.user.name.?});
-                        try self.sendToOthers(client_ctx, UserLiterals.Disconnected);
-                        return;
-                    },
-                    error.Canceled, 
-                    error.WriteFailed, 
-                    error.ReadFailed => {
-                        try self.logger.log_info("Connection dropped/timed out for {s}", .{ip_fmt});
-                        return;
-                    },
-                    else => return err,
-                };
             }
+
+            self.handle_commands(client_ctx) catch |err| switch (err) {
+                error.UserExit => {
+                    std.log.info("User {s} disconnected", .{client_ctx.user.name.?});
+                    
+                    self.sendToOthers(client_ctx, UserLiterals.Disconnected) catch return;
+                },
+                else => {
+                    std.log.err("Connection dropped/timed out for {s}. Error: {}", .{ip_fmt, err});
+                    return;
+                },
+            };
         }
     }
 
@@ -154,17 +133,16 @@ pub const ChatServer = struct {
 
         if (name == null) return;
 
-        ctx.user.name = try self.gpa.dupe(u8, name.?);
-        ctx.user.is_authorized = true;
+        try ctx.user.setName(name.?);
         
-        try self.logger.log_info("User {s} authenticated", .{name.?});
+        std.log.info("User {s} authenticated", .{name.?});
 
         try self.sendToOthers(ctx, UserLiterals.Joined);
+
+        try ctx.send(SystemLiterals.Help);
     }
 
     fn handle_commands(self: *Self, ctx: *ClientContext) !void {
-        try ctx.send(SystemLiterals.Help);
-        
         const command = ctx.readln() catch |err| {
             if (err == error.StreamTooLong) {
                 try ctx.send(SystemLiterals.MessageTooLong);
@@ -176,7 +154,7 @@ pub const ChatServer = struct {
         if (command == null) return;
 
         if (std.mem.startsWith(u8, command.?, "/exit")) {
-            try self.logger.log_info("User {s} requested exit", .{ctx.user.name.?});
+            std.log.info("User {s} requested exit", .{ctx.user.name.?});
             return error.UserExit;
         } else if (std.mem.eql(u8, command.?, "/who")) {
             try self.sendInfoAboutOthers(ctx);
@@ -241,7 +219,7 @@ pub const ChatServer = struct {
     }
 
     fn watchdogTask(self: *Self) void {
-        const timeout_ms: i64 = 60 * std.time.ms_per_s;
+        const timeout_ms: i64 = 5 * std.time.ms_per_s;
 
         while (true) {
             self.io.sleep(.fromSeconds(5), .awake) catch return;
@@ -255,14 +233,14 @@ pub const ChatServer = struct {
                 const last = ctx.last_activity.load(.monotonic);
                 
                 if (now - last > timeout_ms) {
-                    self.logger.log_info("Kicking user due to inactivity", .{}) catch {};
+                    std.log.info("Kicking user due to inactivity", .{});
 
                     Helpers.print(
                         self.io, ctx.stream, 
                         "[KICK] {s}", .{SystemLiterals.KickedByInactivity}
                     ) catch {};
 
-                    ctx.stream.shutdown(self.io, .both) catch {};
+                    ctx.stream.close(self.io);
                 }
             }
         }
@@ -273,7 +251,7 @@ pub const ChatServer = struct {
         self.client_group.await(self.io) catch {};
 
         const clients_snapshot = self.clients.getSnapshot(self.io) catch |err| {
-            self.logger.logError("Failed to get clients snapshot during deinit: {s}", .{@errorName(err)}) catch {};
+            std.log.err("Failed to get clients snapshot during deinit: {s}", .{@errorName(err)});
             return;
         };
 
@@ -283,6 +261,6 @@ pub const ChatServer = struct {
 
         self.clients.deinit(self.io) catch {};
 
-        self.logger.log_info("Server resources cleared.", .{}) catch {};
+        std.log.info("Server resources cleared.", .{});
     }
 };

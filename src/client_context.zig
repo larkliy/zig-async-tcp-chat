@@ -12,6 +12,23 @@ pub const ClientContext = struct {
     writer: net.Stream.Writer, 
     stream: net.Stream,
     last_activity: std.atomic.Value(i64),
+    allocator: std.mem.Allocator,
+
+    pub fn init(self: *Self, io: Io, allocator: std.mem.Allocator, stream: net.Stream) !void {
+        const reader_buf = try allocator.alloc(u8, 1024);
+        const writer_buf = try allocator.alloc(u8, 1024);
+
+        self.allocator = allocator;
+        self.stream = stream;
+        self.reader = stream.reader(io, reader_buf);
+        self.writer = stream.writer(io, writer_buf);
+        self.user = .{ 
+            .allocator = allocator,
+            .is_authorized = false,
+            .name = null
+        };
+        self.last_activity = .init(Io.Timestamp.now(io, .awake).toMilliseconds());
+    }
 
     pub fn send(self: *Self, data: []const u8) !void {
         try self.writer.interface.writeAll(data);
@@ -32,5 +49,16 @@ pub const ClientContext = struct {
 
     pub fn update_activity(self: *Self, io: Io) void {
         self.last_activity.store(Io.Timestamp.now(io, .awake).toMilliseconds(), .monotonic);
+    }
+
+    pub fn deinit(self: *Self, io: Io) void {
+
+        self.user.deinit();
+
+        self.allocator.free(self.reader.interface.buffer);
+        self.allocator.free(self.writer.interface.buffer);
+        
+        self.stream.close(io);
+        self.stream.shutdown(io, .both) catch return;
     }
 };

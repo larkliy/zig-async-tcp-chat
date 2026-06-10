@@ -1,0 +1,12 @@
+.{
+    .name = .zig_async_tcp_chat,
+    .version = "0.16.0",
+    .dependencies = .{
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio?ref=v0.14.0#aa860381beb42bc077e24ef304827cbdc23fcef9",
+            .hash = "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0xed66e7e1661989a1,
+}
