@@ -1,5 +1,3 @@
-
-
 pub const UserLiterals = struct {
     pub const Joined = "User has joined the chat room.\n";
     pub const Disconnected = "User has disconnected.\n";
@@ -20,6 +18,7 @@ pub const SystemLiterals = struct {
         \\ Available commands:
         \\ /who - Shows list of online users
         \\ /exit - Disconnects from the chat room
+        \\ /help - Show help message.
         \\
     ;
 
