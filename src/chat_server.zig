@@ -125,6 +125,16 @@ fn handle_auth(self: *Self, ctx: *ClientContext) !void {
     };
 
     if (name == null) return;
+    
+    const clients_snapshot = try self.clients.getSnapshot(self.io);
+    defer self.gpa.free(clients_snapshot);
+
+    for (clients_snapshot) |client| {
+        if (std.mem.eql(u8, client.user.name.?, name.?)) {
+            try ctx.send(SystemLiterals.NameAlreadyUsed);
+            return;
+        }
+    }
 
     try ctx.user.setName(name.?);
 
@@ -149,15 +159,46 @@ fn handle_commands(self: *Self, ctx: *ClientContext) !void {
     if (std.mem.startsWith(u8, command.?, "/exit")) {
         std.log.info("User {s} requested exit", .{ctx.user.name.?});
         return error.UserExit;
-    } else if (std.mem.eql(u8, command.?, "/who")) {
+    } else if (std.mem.eql(u8, command.?, "/list")) {
         try self.sendInfoAboutOthers(ctx);
     } else if (std.mem.eql(u8, command.?, "/help")) {
         try ctx.send(SystemLiterals.Help);
+    } else if (std.mem.startsWith(u8, command.?, "/msg")) {
+        try self.sendPrivateMessage(command.?, ctx);
     } else {
         try self.sendToOthers(ctx, command.?);
     }
 
     ctx.update_activity(self.io);
+}
+
+fn sendPrivateMessage(self: *Self, command: []const u8, ctx: *ClientContext) !void {
+    var username_opt: ?[]const u8 = null;
+    var message_opt: ?[]const u8 = null;
+
+    var iter = std.mem.tokenizeScalar(u8, command, ' ');
+    _ = iter.next(); // command itself: /msg 
+    username_opt = iter.next();
+    message_opt = iter.rest();
+
+    if (username_opt == null or message_opt == null) {
+        try ctx.send(SystemLiterals.UsernameOrMessageNull);
+        return;
+    }
+
+    const clients_snapshot = try self.clients.getSnapshot(self.io);
+    defer self.gpa.free(clients_snapshot);
+
+    for (clients_snapshot) |client| {
+        if (client.user.name) |name| {
+            if (std.mem.eql(u8, username_opt.?, name)) {
+                try Helpers.print(self.io, client.stream, "[PM] {s}: {s}\n", .{ ctx.user.name.?, message_opt.? });
+                break;
+            }
+        }
+    }
+
+    try ctx.send(SystemLiterals.MessageSent);
 }
 
 fn sendInfoAboutOthers(self: *Self, ctx: *ClientContext) !void {

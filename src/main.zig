@@ -28,7 +28,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var server_job = try Io.concurrent(io, startServer, .{ &server, config.address, config.port });
     server_job.await(io) catch {};
     
-
     var input_buffer: [1]u8 = undefined;
     var stdin_reader = Io.File.stdin().reader(io, &input_buffer);
     _ = stdin_reader.interface.takeByte() catch {};
