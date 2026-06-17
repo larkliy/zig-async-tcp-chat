@@ -130,9 +130,11 @@ fn handle_auth(self: *Self, ctx: *ClientContext) !void {
     defer self.gpa.free(clients_snapshot);
 
     for (clients_snapshot) |client| {
-        if (std.mem.eql(u8, client.user.name.?, name.?)) {
-            try ctx.send(SystemLiterals.NameAlreadyUsed);
-            return;
+        if (client.user.name) |other_name| {
+            if (std.mem.eql(u8, other_name, name.?)) {
+                try ctx.send(SystemLiterals.NameAlreadyUsed);
+                return;
+            }
         }
     }
 
